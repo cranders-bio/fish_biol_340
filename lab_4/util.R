@@ -214,34 +214,38 @@ pairwise_relatedness <- function(file) {
   # Relatedness of an individual with itself
   diag(relatedness_matrix) <- 1
   
-  max_abs <- max(abs(relatedness_matrix), na.rm = TRUE)
+  # Define a contrasting color scale
+max_abs <- max(abs(relatedness_matrix), na.rm = TRUE)
 
-  my_colors <- colorRampPalette(
+my_colors <- colorRampPalette(
   c("#2166AC", "#F7F7F7", "#B2182B")
-  )(100)
+)(100)
 
-  my_breaks <- seq(-max_abs, max_abs, length.out = 101)
+my_breaks <- seq(-max_abs, max_abs, length.out = 101)
 
-  pheatmap(
+# Cluster individuals based on their relatedness profiles
+dist_matrix <- as.dist(
+  1 - relatedness_matrix
+)
+
+hc <- hclust(
+  dist_matrix,
+  method = "average"
+)
+
+# Plot with clustered individuals
+pheatmap(
   relatedness_matrix,
   color = my_colors,
   breaks = my_breaks,
-  cluster_rows = TRUE,
-  cluster_cols = TRUE,
+  cluster_rows = hc,
+  cluster_cols = hc,
+  clustering_distance_rows = "correlation",
+  clustering_distance_cols = "correlation",
   display_numbers = FALSE,
   main = "Pairwise Relatedness (Queller & Goodnight)",
   fontsize = 10
-  )
-
-  # Make the heatmap
-  pheatmap(
-    relatedness_matrix,
-    cluster_rows = TRUE,
-    cluster_cols = TRUE,
-    display_numbers = FALSE,
-    main = "Pairwise Relatedness (Queller & Goodnight)",
-    fontsize = 10
-  )
+)
   
   # Return the matrix
   return(relatedness_matrix)
