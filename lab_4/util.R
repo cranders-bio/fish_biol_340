@@ -1,4 +1,6 @@
 library(tidyverse)
+library(related)
+library(pheatmap)
 
 allele_frequencies <- function(file) {
   
@@ -123,4 +125,124 @@ locus_statistics <- function(file) {
   })
   
   return(results)
+}
+
+pairwise_relatedness <- function(file) {
+  
+  # Read the original CSV
+  dat <- read_csv(file)
+  
+  # Find the genotype columns
+  # They should end in "a" or "b"
+  genotype_cols <- names(dat)[
+    str_ends(names(dat), "a") | str_ends(names(dat), "b")
+  ]
+  
+  # Keep the individual ID and genotype data
+  genotype_data <- dat %>%
+    select("individual ID", all_of(genotype_cols))
+  
+  # Make sure individual IDs are characters
+  genotype_data$"individual ID" <- as.character(
+    genotype_data$"individual ID"
+  )
+  
+  # Replace missing values with 0
+  genotype_data <- genotype_data %>%
+    mutate(
+      across(
+        all_of(genotype_cols),
+        ~ replace_na(.x, 0)
+      )
+    )
+  
+  # related requires the genotype data to be in a temporary
+  # text file with no column names
+  temp_file <- tempfile(fileext = ".txt")
+  
+  write.table(
+    genotype_data,
+    file = temp_file,
+    sep = "\t",
+    row.names = FALSE,
+    col.names = FALSE,
+    quote = FALSE
+  )
+  
+  # Calculate Queller & Goodnight relatedness
+  results <- coancestry(
+    temp_file,
+    quellergt = 1
+  )
+  
+  # Remove the temporary file
+  unlink(temp_file)
+  
+  # Get the pairwise relatedness results
+  relatedness <- results$relatedness
+  
+  # The Queller & Goodnight estimate is column 10
+  relatedness <- relatedness %>%
+    select(
+      ID1 = 2,
+      ID2 = 3,
+      relatedness = 10
+    )
+  
+  # Get all individual IDs
+  IDs <- genotype_data$"individual ID"
+  
+  # Create an empty relatedness matrix
+  relatedness_matrix <- matrix(
+    NA,
+    nrow = length(IDs),
+    ncol = length(IDs),
+    dimnames = list(IDs, IDs)
+  )
+  
+  # Put the pairwise estimates into the matrix
+  for (i in 1:nrow(relatedness)) {
+    
+    id1 <- as.character(relatedness$ID1[i])
+    id2 <- as.character(relatedness$ID2[i])
+    value <- relatedness$relatedness[i]
+    
+    relatedness_matrix[id1, id2] <- value
+    relatedness_matrix[id2, id1] <- value
+  }
+  
+  # Relatedness of an individual with itself
+  diag(relatedness_matrix) <- 1
+  
+  max_abs <- max(abs(relatedness_matrix), na.rm = TRUE)
+
+  my_colors <- colorRampPalette(
+  c("#2166AC", "#F7F7F7", "#B2182B")
+  )(100)
+
+  my_breaks <- seq(-max_abs, max_abs, length.out = 101)
+
+  pheatmap(
+  relatedness_matrix,
+  color = my_colors,
+  breaks = my_breaks,
+  cluster_rows = TRUE,
+  cluster_cols = TRUE,
+  display_numbers = FALSE,
+  main = "Pairwise Relatedness (Queller & Goodnight)",
+  fontsize = 10
+  )
+
+  # Make the heatmap
+  pheatmap(
+    relatedness_matrix,
+    cluster_rows = TRUE,
+    cluster_cols = TRUE,
+    display_numbers = FALSE,
+    main = "Pairwise Relatedness (Queller & Goodnight)",
+    fontsize = 10
+  )
+  
+  # Return the matrix
+  return(relatedness_matrix)
 }
