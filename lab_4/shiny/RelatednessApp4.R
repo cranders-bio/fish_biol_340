@@ -6,8 +6,8 @@
 #
 # Data format: column 1 = individual ID, column 2 = group
 # ("fem" = female, "off" = offspring, anything else = male),
-# optionally a column named "father" (or "sire") giving each offspring's
-# father, then two columns per locus. 0 or blank = missing allele.
+# then two columns per locus. (A column named "father" or "sire", if present,
+# is ignored.) 0 or blank = missing allele.
 # Offspring are listed directly after their mother.
 
 library(shiny)
@@ -23,14 +23,9 @@ read_genotypes <- function(path) {
   d <- read.csv(path, check.names = FALSE, stringsAsFactors = FALSE,
                 colClasses = "character", strip.white = TRUE)
 
-  # optional father column, recognised by name
+  # drop a father/sire column if there is one; it is not used
   fc <- which(tolower(trimws(names(d))) %in% c("father", "sire"))
-  father <- rep(NA_character_, nrow(d))
-  if (length(fc)) {
-    father <- trimws(d[[fc[1]]])
-    father[father %in% c("", "0", "NA")] <- NA
-    d <- d[, -fc, drop = FALSE]
-  }
+  if (length(fc)) d <- d[, -fc, drop = FALSE]
 
   if (ncol(d) < 4 || (ncol(d) - 2) %% 2 != 0)
     stop("Expected an ID column, a group column, then two columns per locus.")
@@ -64,10 +59,8 @@ read_genotypes <- function(path) {
     if (role[i] == "female") cur <- id[i]
     if (role[i] == "offspring") mother[i] <- cur
   }
-  father[role != "offspring"] <- NA
 
   info <- data.frame(ID = id, Group = pop, Role = role, Mother = mother,
-                     Father = father,
                      `Loci typed` = rowSums(!is.na(A1)),
                      stringsAsFactors = FALSE, check.names = FALSE)
   list(info = info, A1 = A1, A2 = A2, loci = loci)
@@ -121,39 +114,6 @@ qg_pairs <- function(id1, id2, A1, A2, P1, P2) {
   if (!length(id1)) return(matrix(numeric(0), 2, 0, dimnames = list(c("r", "loci"), NULL)))
   vapply(seq_along(id1), function(i) qg_pair(id1[i], id2[i], A1, A2, P1, P2),
          c(r = 0, loci = 0))
-}
-
-## ---- Known-pedigree pairs --------------------------------------------------
-# Adults are assumed unrelated founders. Offspring without a known father
-# are only used for parent-offspring pairs with their mother.
-
-pedigree_pairs <- function(info) {
-  id <- info$ID
-  if (length(id) < 2) return(NULL)
-  mo <- setNames(info$Mother, id)
-  fa <- setNames(info$Father, id)
-  pr <- combn(id, 2)
-  a <- pr[1, ]; b <- pr[2, ]
-  ma <- unname(mo[a]); mb <- unname(mo[b]); fa_ <- unname(fa[a]); fb <- unname(fa[b])
-
-  po <- (!is.na(mb) & mb == a) | (!is.na(fb) & fb == a) |
-        (!is.na(ma) & ma == b) | (!is.na(fa_) & fa_ == b)
-  sm <- !is.na(ma) & !is.na(mb) & ma == mb
-  kf <- !is.na(fa_) & !is.na(fb)
-  sf <- kf & fa_ == fb
-  known_a <- is.na(ma) | !is.na(fa_)   # adult, or offspring with both parents known
-  known_b <- is.na(mb) | !is.na(fb)
-
-  cls <- rep(NA_character_, length(a))
-  cls[!po & sm & sf] <- "Full sibs"
-  cls[!po & sm & kf & !sf] <- "Half sibs (maternal)"
-  cls[!po & !sm & sf] <- "Half sibs (paternal)"
-  cls[!po & !sm & !sf & known_a & known_b] <- "Unrelated"
-  cls[po] <- "Parent-offspring"
-
-  keep <- !is.na(cls)
-  data.frame(ID1 = a[keep], ID2 = b[keep], Detail = cls[keep],
-             Class = sub(" \\(.*", "", cls[keep]), stringsAsFactors = FALSE)
 }
 
 ## ---- Simulated pairs from allele frequencies --------------------------------
@@ -262,7 +222,7 @@ ui <- fluidPage(
   titlePanel("Pairwise relatedness from microsatellites",
              windowTitle = "Pairwise relatedness"),
   tags$p(style = "color:#777; margin-top:-8px;",
-         "Version 3: expected distributions from simulation and from known relationships"),
+         "Version 5"),
   sidebarLayout(
     sidebarPanel(
       width = 4,
@@ -271,6 +231,10 @@ ui <- fluidPage(
       radioButtons("freq_ref", "Allele frequencies estimated from",
                    c("Adults only (unrelated reference)" = "adults",
                      "All individuals" = "all")),
+      uiOutput("loci_ui"),
+      tags$p(class = "help-note", style = "margin-top:-10px;",
+             actionLink("loci_all", "all"), " · ", actionLink("loci_none", "none")),
+      hr(),
       tags$p(class = "help-note",
              "Each box is one comparison group. Pairs are formed only within a family; ",
              "leave a blank line between families to pool several families into one distribution."),
@@ -279,10 +243,7 @@ ui <- fluidPage(
       set_box(3, "Unrelated adults", "Unrelated"),
       actionLink("fill_adults", "Fill the third box with all adults"),
       hr(),
-      checkboxGroupInput("exp_src", "Expected distributions to draw",
-                         c("Simulated from allele frequencies" = "Simulated",
-                           "Known relationships in the data" = "Pedigree"),
-                         selected = c("Simulated", "Pedigree")),
+      checkboxInput("show_sim", "Overlay simulated expected distributions", TRUE),
       sliderInput("nsim", "Simulated pairs per relationship", min = 500, max = 10000,
                   value = 2000, step = 500),
       checkboxInput("show_expected", "Show theoretical values as lines (0, 0.25, 0.5)", TRUE),
@@ -293,6 +254,7 @@ ui <- fluidPage(
     ),
     mainPanel(
       width = 8,
+      uiOutput("status"),
       tabsetPanel(
         tabPanel("Distributions",
                  uiOutput("messages"),
@@ -301,14 +263,11 @@ ui <- fluidPage(
                  tableOutput("summary")),
         tabPanel("Expected",
                  br(),
-                 tags$p("Reference distributions for each relationship. ",
-                        "Simulated pairs are drawn from the allele frequencies; known pairs are ",
-                        "real birds whose relationship is known from the file."),
-                 uiOutput("ped_note"),
+                 tags$p("Expected distributions of r for each relationship, from pairs simulated ",
+                        "with the allele frequencies of the ticked loci. Dotted lines are the theoretical values."),
                  plotOutput("exp_plot", height = "720px"),
                  h4("Summary"),
-                 tableOutput("exp_summary"),
-                 downloadButton("dl_ped", "Download known-relationship pairs (CSV)")),
+                 tableOutput("exp_summary")),
         tabPanel("Pairwise values",
                  br(),
                  downloadButton("dl", "Download CSV"),
@@ -328,20 +287,80 @@ ui <- fluidPage(
 
 server <- function(input, output, session) {
 
-  dat <- reactive({
-    path <- if (!is.null(input$file)) input$file$datapath else default_file
-    validate(need(file.exists(path),
-                  "Upload a genotype CSV, or place TurkeyPO.csv next to app.R."))
-    tryCatch(read_genotypes(path),
-             error = function(e) validate(need(FALSE, conditionMessage(e))))
+  # default data file: TurkeyPO.csv in the app folder, or a renamed download
+  # such as "TurkeyPO (1).csv" (an answer-key file with fathers is skipped)
+  find_default <- function() {
+    if (file.exists(default_file)) return(default_file)
+    cand <- list.files(".", pattern = "^TurkeyPO.*\\.csv$", ignore.case = TRUE)
+    cand <- cand[!grepl("father", cand, ignore.case = TRUE)]
+    if (length(cand)) cand[1] else NA_character_
+  }
+
+  raw_dat <- reactive({
+    if (!is.null(input$file)) {
+      path <- input$file$datapath; shown <- input$file$name
+    } else {
+      path <- find_default(); shown <- path
+    }
+    validate(need(!is.na(path) && file.exists(path),
+                  paste0("No data file found. Put TurkeyPO.csv in the same folder as app.R ",
+                         "(R is looking in: ", getwd(), "), or upload it with the button on the left.")))
+    d <- tryCatch(read_genotypes(path),
+                  error = function(e) validate(need(FALSE, paste("Could not read the file:", conditionMessage(e)))))
+    d$file <- shown
+    d
   })
 
-  adults <- reactive(dat()$info$ID[dat()$info$Role != "offspring"])
+  output$status <- renderUI({
+    d <- raw_dat()
+    tags$p(style = "color:#2b6a3a; margin:6px 0 10px;",
+           sprintf("Loaded %s: %d individuals (%d adults, %d offspring), %d loci.",
+                   basename(d$file), nrow(d$info), sum(d$info$Role != "offspring"),
+                   sum(d$info$Role == "offspring"), length(d$loci)))
+  })
+
+  ## loci tick boxes -------------------------------------------------------
+  # The selection is kept in loci_sel(); it starts as all loci of the file.
+  loci_sel <- reactiveVal(NULL)
+  observeEvent(raw_dat(), loci_sel(raw_dat()$loci))
+
+  output$loci_ui <- renderUI({
+    l <- raw_dat()$loci
+    checkboxGroupInput("loci", "Loci used", choices = l, selected = l, inline = TRUE)
+  })
+
+  # user ticks/unticks (ignoreInit skips the NULL before the boxes exist)
+  observeEvent(input$loci, {
+    loci_sel(if (is.null(input$loci)) character(0) else input$loci)
+  }, ignoreNULL = FALSE, ignoreInit = TRUE)
+
+  observeEvent(input$loci_all,
+               updateCheckboxGroupInput(session, "loci", selected = raw_dat()$loci))
+  observeEvent(input$loci_none,
+               updateCheckboxGroupInput(session, "loci", selected = character(0)))
+
+  # genotype data restricted to the ticked loci; everything downstream uses this
+  dat <- reactive({
+    d <- raw_dat()
+    chosen <- loci_sel()
+    if (is.null(chosen)) chosen <- d$loci
+    sel <- intersect(d$loci, chosen)
+    validate(need(length(sel) > 0, "Tick at least one locus."))
+    d$A1 <- d$A1[, sel, drop = FALSE]
+    d$A2 <- d$A2[, sel, drop = FALSE]
+    d$loci <- sel
+    d$info$`Loci typed` <- rowSums(!is.na(d$A1))
+    d
+  })
+
+  loci_label <- reactive(sprintf("Based on %d of %d loci", length(dat()$loci), length(raw_dat()$loci)))
+
+  adults <- reactive(raw_dat()$info$ID[raw_dat()$info$Role != "offspring"])
 
   fill_adults <- function() {
     updateTextAreaInput(session, "ids3", value = paste(adults(), collapse = " "))
   }
-  observeEvent(dat(), fill_adults())          # prefill on load / new upload
+  observeEvent(raw_dat(), fill_adults())      # prefill on load / new upload
   observeEvent(input$fill_adults, fill_adults())
 
   freqs <- reactive({
@@ -359,22 +378,7 @@ server <- function(input, output, session) {
     simulate_pairs(fq$f, input$nsim)
   })
 
-  ped_ref <- reactive({
-    d <- dat(); fq <- freqs()
-    pp <- pedigree_pairs(d$info)
-    if (is.null(pp) || !nrow(pp)) return(NULL)
-    rl <- qg_pairs(pp$ID1, pp$ID2, d$A1, d$A2, fq$P1, fq$P2)
-    pp$r <- rl["r", ]
-    pp$Loci <- rl["loci", ]
-    pp$Source <- "Pedigree"
-    pp[!is.na(pp$r), ]
-  })
-
-  ref_all <- reactive({
-    p <- ped_ref()
-    rbind(sim_ref(),
-          if (!is.null(p)) p[, c("Source", "Class", "Detail", "r")])
-  })
+  ref_all <- reactive(sim_ref())
 
   ## user sets ------------------------------------------------------------
 
@@ -436,11 +440,7 @@ server <- function(input, output, session) {
       r <- s$r[!is.na(s$r)]
       nm <- as.character(s$Set[1])
       cl <- res$cmp[[nm]]
-      ref_mean <- function(src) {
-        if (cl == "none" || !(src %in% input$exp_src)) return(NA_real_)
-        v <- ref$r[ref$Source == src & ref$Class == cl]
-        if (length(v)) mean(v) else NA_real_
-      }
+      sim <- if (cl == "none") numeric(0) else ref$r[ref$Class == cl]
       data.frame(Set = nm,
                  Families = length(unique(s$Family)),
                  Individuals = length(unique(c(s$ID1, s$ID2))),
@@ -450,8 +450,8 @@ server <- function(input, output, session) {
                  Median = median(r),
                  Min = min(r), Max = max(r),
                  `Compared with` = if (cl == "none") "" else cl,
-                 `Simulated mean` = ref_mean("Simulated"),
-                 `Pedigree mean` = ref_mean("Pedigree"),
+                 `Simulated mean` = if (length(sim)) mean(sim) else NA_real_,
+                 `Simulated SD` = if (length(sim) > 1) sd(sim) else NA_real_,
                  check.names = FALSE, stringsAsFactors = FALSE)
     }))
   })
@@ -480,18 +480,16 @@ server <- function(input, output, session) {
 
     xl <- range(c(-0.5, 1, p$r))
     # expected curves, scaled to each set's number of pairs
-    curves <- do.call(rbind, lapply(levels(p$Set), function(nm) {
-      cl <- res$cmp[[nm]]
-      if (is.null(cl) || cl == "none") return(NULL)
-      np <- sum(p$Set == nm)
-      do.call(rbind, lapply(input$exp_src, function(src) {
-        cd <- scaled_density(ref$r[ref$Source == src & ref$Class == cl], np, bw, xl[1], xl[2])
+    curves <- if (!isTRUE(input$show_sim)) NULL else
+      do.call(rbind, lapply(levels(p$Set), function(nm) {
+        cl <- res$cmp[[nm]]
+        if (is.null(cl) || cl == "none") return(NULL)
+        cd <- scaled_density(ref$r[ref$Class == cl], sum(p$Set == nm), bw, xl[1], xl[2])
         if (is.null(cd)) return(NULL)
         cd$Set <- nm
-        cd$Expected <- paste0(cl, ": ", if (src == "Simulated") "simulated" else "known relationship")
+        cd$Expected <- paste("Expected (simulated):", cl)
         cd
       }))
-    }))
     if (!is.null(curves)) curves$Set <- factor(curves$Set, levels = levels(p$Set))
 
     g <- ggplot(p, aes(x = r))
@@ -524,7 +522,7 @@ server <- function(input, output, session) {
       scale_linetype_manual(values = c("solid", "longdash", "dotdash", "twodash",
                                        "dashed", "dotted", "11", "41")) +
       labs(x = "Pairwise relatedness r (Queller & Goodnight)", y = "Number of pairs",
-           fill = NULL, colour = NULL, linetype = NULL) +
+           subtitle = loci_label(), fill = NULL, colour = NULL, linetype = NULL) +
       theme_minimal(base_size = 15) +
       theme(legend.position = "top", legend.direction = "vertical",
             strip.text = element_text(face = "bold", hjust = 0, size = 15),
@@ -539,55 +537,36 @@ server <- function(input, output, session) {
 
   output$exp_plot <- renderPlot({
     ref <- ref_all()
-    ref <- ref[ref$Source %in% c("Simulated", "Pedigree"), ]
     ref$Class <- factor(ref$Class, levels = classes)
-    ref$Source <- factor(ifelse(ref$Source == "Simulated", "Simulated", "Known relationship"),
-                         levels = c("Simulated", "Known relationship"))
-    means <- aggregate(r ~ Class + Source, data = ref, FUN = mean)
+    means <- aggregate(r ~ Class, data = ref, FUN = mean)
     theo <- data.frame(Class = factor(names(class_r), levels = classes), r = class_r)
 
-    ggplot(ref, aes(x = r, fill = Source)) +
-      geom_histogram(aes(y = after_stat(density)), binwidth = input$binwidth,
-                     boundary = 0, position = "identity", alpha = 0.5, colour = "white") +
-      geom_vline(data = theo, aes(xintercept = r), linetype = "dotted", colour = "grey35") +
-      geom_vline(data = means, aes(xintercept = r, colour = Source), linewidth = 1.1) +
-      facet_wrap(~Class, ncol = 1, drop = FALSE) +
-      scale_fill_manual(values = c("Simulated" = "#9AA5B1", "Known relationship" = "#E07B39")) +
-      scale_colour_manual(values = c("Simulated" = "#4A5560", "Known relationship" = "#B04E12")) +
+    ggplot(ref, aes(x = r)) +
+      geom_histogram(binwidth = input$binwidth, boundary = 0,
+                     fill = "#9AA5B1", colour = "white") +
+      geom_vline(data = theo, aes(xintercept = r), linetype = "dotted", colour = "grey25") +
+      geom_vline(data = means, aes(xintercept = r), colour = "#C8364A", linewidth = 1.1) +
+      geom_text(data = means, aes(x = r, y = Inf, label = sprintf("  mean = %.3f", r)),
+                vjust = 1.5, hjust = 0, size = 4.3, colour = "#C8364A") +
+      facet_wrap(~Class, ncol = 1) +
       coord_cartesian(xlim = range(c(-0.75, 1.1, quantile(ref$r, c(0.001, 0.999))))) +
-      labs(x = "Pairwise relatedness r (Queller & Goodnight)", y = "Density",
-           fill = NULL, colour = NULL) +
+      labs(x = "Pairwise relatedness r (Queller & Goodnight)", y = "Number of simulated pairs",
+           subtitle = loci_label()) +
       theme_minimal(base_size = 15) +
-      theme(legend.position = "top",
-            strip.text = element_text(face = "bold", hjust = 0, size = 15),
+      theme(strip.text = element_text(face = "bold", hjust = 0, size = 15),
             panel.grid.minor = element_blank())
   })
 
   output$exp_summary <- renderTable({
     ref <- ref_all()
-    ref$Source <- ifelse(ref$Source == "Simulated", "Simulated", "Known relationship")
-    grp <- unique(ref[, c("Source", "Detail")])
-    grp <- grp[order(grp$Source != "Simulated",
-                     match(sub(" \\(.*", "", grp$Detail), classes), grp$Detail), ]
-    do.call(rbind, lapply(seq_len(nrow(grp)), function(i) {
-      v <- ref$r[ref$Source == grp$Source[i] & ref$Detail == grp$Detail[i]]
-      cl <- sub(" \\(.*", "", grp$Detail[i])
-      data.frame(Source = grp$Source[i], Relationship = grp$Detail[i],
-                 `Theoretical r` = class_r[[cl]], Pairs = length(v),
-                 Mean = mean(v), SD = if (length(v) > 1) sd(v) else NA_real_,
+    do.call(rbind, lapply(classes, function(cl) {
+      v <- ref$r[ref$Class == cl]
+      data.frame(Relationship = cl, `Theoretical r` = class_r[[cl]], Pairs = length(v),
+                 Mean = mean(v), SD = sd(v),
                  `2.5%` = unname(quantile(v, 0.025)), `97.5%` = unname(quantile(v, 0.975)),
                  check.names = FALSE, stringsAsFactors = FALSE)
     }))
-  }, digits = 3, na = "")
-
-  output$dl_ped <- downloadHandler(
-    filename = function() "known_pairs_relatedness.csv",
-    content = function(file) {
-      p <- ped_ref()
-      write.csv(if (is.null(p)) data.frame() else p[, c("ID1", "ID2", "Detail", "r", "Loci")],
-                file, row.names = FALSE)
-    }
-  )
+  }, digits = 3)
 
   ## other tabs -----------------------------------------------------------
 
@@ -602,18 +581,8 @@ server <- function(input, output, session) {
     content = function(file) write.csv(results()$pairs, file, row.names = FALSE)
   )
 
-  has_fathers <- reactive(any(!is.na(dat()$info$Father)))
-
-  output$ped_note <- renderUI({
-    if (has_fathers()) return(NULL)
-    div(style = "background:#eef4fb; border-left:4px solid #4C78A8; padding:8px 12px; margin-bottom:10px;",
-        "The known relationships in this file are each chick with its mother, and pairs of adults ",
-        "(assumed unrelated). Expected distributions for full and half sibs come from simulation.")
-  })
-
   output$info <- renderTable({
     info <- dat()$info
-    if (!has_fathers()) info$Father <- NULL
     info
   }, na = "")
 
@@ -626,12 +595,10 @@ server <- function(input, output, session) {
       "\\(p_a\\) is the population frequency of allele a."),
     h4("Expected distributions"),
     tags$ul(
-      tags$li(strong("Simulated: "), "pairs of each relationship are generated by drawing founder genotypes from the ",
-              "allele frequencies (Hardy–Weinberg, independent loci) and passing alleles to offspring by Mendelian ",
-              "inheritance. Their spread shows how much r varies just because only a limited number of loci are typed."),
-      tags$li(strong("Known relationships: "), "pairs of real birds whose relationship is known from the file ",
-              "(each chick and its mother; adults are treated as unrelated). These include real-data effects the simulation leaves out: ",
-              "few reference individuals, missing genotypes, scoring errors and null alleles."),
+      tags$li("Pairs of each relationship are simulated by drawing founder genotypes from the allele frequencies ",
+              "of the ticked loci (Hardy–Weinberg, independent loci, no missing data or scoring errors) and passing ",
+              "alleles to offspring by Mendelian inheritance. Their spread shows how much r varies just because ",
+              "only a limited number of loci are typed. Untick loci to see the distributions widen."),
       tags$li("Theoretical values: unrelated 0, half sibs 0.25, full sibs and parent–offspring 0.5.")
     ),
     h4("Notes"),
