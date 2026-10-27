@@ -4,6 +4,7 @@ if (!requireNamespace("shinyjs", quietly = TRUE)) install.packages("shinyjs")
 
 library(shiny)
 library(shinyjs)
+library(tidyverse)
 
 ui <- fluidPage(
   useShinyjs(),
